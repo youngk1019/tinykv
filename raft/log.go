@@ -129,12 +129,13 @@ func (l *RaftLog) LastIndex() uint64 {
 	if len(l.entries) > 0 {
 		return l.entries[len(l.entries)-1].Index
 	}
-	hi, err := l.storage.LastIndex()
+	// when remove entries, storage will not update
+	firstIndex, err := l.storage.FirstIndex()
 	if err != nil {
 		log.Errorf("storage last index error :%s", err.Error())
 		panic(err)
 	}
-	return hi
+	return firstIndex - 1
 }
 
 // Term return the term of the entry in the given index
@@ -147,4 +148,42 @@ func (l *RaftLog) Term(i uint64) (uint64, error) {
 		return l.entries[i-l.firstIndex].Term, nil
 	}
 	return l.storage.Term(i)
+}
+
+// Entries return entries [low, high)
+func (l *RaftLog) Entries(low, high uint64) ([]pb.Entry, error) {
+	if low >= l.firstIndex && high-l.firstIndex <= uint64(len(l.entries)) {
+		return l.entries[low-l.firstIndex : high-l.firstIndex], nil
+	}
+	entries, err := l.storage.Entries(low, high)
+	if err != nil {
+		return nil, err
+	}
+	return entries, nil
+}
+
+func (l *RaftLog) EntriesFrom(from uint64) ([]pb.Entry, error) {
+	if from >= l.firstIndex {
+		return l.entries[from-l.firstIndex:], nil
+	}
+	lastIndex := l.LastIndex()
+	entries, err := l.storage.Entries(from, lastIndex)
+	if err != nil {
+		return nil, err
+	}
+	return entries, nil
+}
+
+func (l *RaftLog) RemoveEntriesFrom(from uint64) {
+	l.stabled = min(l.stabled, from-1)
+	if from-l.firstIndex >= uint64(len(l.entries)) {
+		return
+	}
+	l.entries = l.entries[:from-l.firstIndex]
+}
+
+func (l *RaftLog) AppendEntries(entries ...*pb.Entry) {
+	for _, ent := range entries {
+		l.entries = append(l.entries, *ent)
+	}
 }
