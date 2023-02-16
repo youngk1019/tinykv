@@ -75,11 +75,14 @@ func newLog(storage Storage) *RaftLog {
 		log.Errorf("storage last index error :%s", err.Error())
 		panic(err)
 	}
-	entries, err := storage.Entries(lo, hi+1)
+	entries := make([]pb.Entry, 0)
+	// if err != nil, do nothing and return a not nil entries, wait leader restore entries
+	ret, err := storage.Entries(lo, hi+1)
 	if err != nil {
-		log.Errorf("storage entries error :%s", err.Error())
+		log.Errorf("storage entries low: %d high: %d error: %s", lo, hi, err.Error())
 		panic(err)
 	}
+	entries = append(entries, ret...)
 	return &RaftLog{
 		storage:    storage,
 		committed:  hardState.Commit,
@@ -95,6 +98,17 @@ func newLog(storage Storage) *RaftLog {
 // grow unlimitedly in memory
 func (l *RaftLog) maybeCompact() {
 	// Your Code Here (2C).
+	first, err := l.storage.FirstIndex()
+	if err != nil {
+		log.Errorf("storage first index error :%s", err.Error())
+		panic(err)
+	}
+	if first > l.firstIndex {
+		entries := l.entries[first-l.firstIndex:]
+		l.entries = make([]pb.Entry, 0)
+		l.entries = append(l.entries, entries...)
+	}
+	l.firstIndex = first
 }
 
 // allEntries return all the entries not compacted.
@@ -108,10 +122,8 @@ func (l *RaftLog) allEntries() []pb.Entry {
 // unstableEntries return all the unstable entries
 func (l *RaftLog) unstableEntries() []pb.Entry {
 	// Your Code Here (2A).
-	if len(l.entries) > 0 {
-		return l.entries[l.stabled-l.firstIndex+1:]
-	}
-	return nil
+	entries, _ := l.EntriesFrom(l.stabled + 1)
+	return entries
 }
 
 // nextEnts returns all the committed but not applied entries
@@ -135,7 +147,7 @@ func (l *RaftLog) LastIndex() uint64 {
 		log.Errorf("storage last index error :%s", err.Error())
 		panic(err)
 	}
-	return firstIndex - 1
+	return max(l.firstIndex-1, firstIndex-1)
 }
 
 // Term return the term of the entry in the given index
@@ -146,6 +158,9 @@ func (l *RaftLog) Term(i uint64) (uint64, error) {
 			return 0, ErrUnavailable
 		}
 		return l.entries[i-l.firstIndex].Term, nil
+	}
+	if !IsEmptySnap(l.pendingSnapshot) && i == l.pendingSnapshot.Metadata.Index {
+		return l.pendingSnapshot.Metadata.Term, nil
 	}
 	return l.storage.Term(i)
 }
@@ -174,7 +189,7 @@ func (l *RaftLog) EntriesFrom(from uint64) ([]pb.Entry, error) {
 	return entries, nil
 }
 
-func (l *RaftLog) RemoveEntriesFrom(from uint64) {
+func (l *RaftLog) Truncate(from uint64) {
 	l.stabled = min(l.stabled, from-1)
 	if from-l.firstIndex >= uint64(len(l.entries)) {
 		return

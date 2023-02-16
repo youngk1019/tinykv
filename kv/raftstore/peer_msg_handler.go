@@ -81,7 +81,24 @@ func (d *peerMsgHandler) process(entry *eraftpb.Entry, wb *engine_util.WriteBatc
 		panic(err)
 	}
 
-	return d.processRequest(entry, msg, wb)
+	handle := d.processRequest
+	if msg.AdminRequest != nil {
+		handle = d.processAdminRequest
+	}
+	return handle(entry, msg, wb)
+}
+
+func (d *peerMsgHandler) processAdminRequest(entry *eraftpb.Entry, requests *raft_cmdpb.RaftCmdRequest, kvWB *engine_util.WriteBatch) *engine_util.WriteBatch {
+	adminReq := requests.AdminRequest
+	switch adminReq.CmdType {
+	case raft_cmdpb.AdminCmdType_CompactLog:
+		if adminReq.CompactLog.CompactIndex > d.peerStorage.applyState.TruncatedState.Index {
+			d.peerStorage.applyState.TruncatedState.Index = adminReq.CompactLog.CompactIndex
+			d.peerStorage.applyState.TruncatedState.Term = adminReq.CompactLog.CompactTerm
+			d.ScheduleCompactLog(adminReq.CompactLog.CompactIndex)
+		}
+	}
+	return kvWB
 }
 
 func (d *peerMsgHandler) processRequest(entry *eraftpb.Entry, msg *raft_cmdpb.RaftCmdRequest, wb *engine_util.WriteBatch) *engine_util.WriteBatch {

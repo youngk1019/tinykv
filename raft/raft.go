@@ -243,10 +243,12 @@ func (r *Raft) sendAppend(to uint64) bool {
 	preIndex := r.Prs[to].Next - 1
 	preLogTerm, err := r.RaftLog.Term(preIndex)
 	if err != nil {
+		r.sendSnapshot(to)
 		return false
 	}
 	entries, err := r.RaftLog.EntriesFrom(preIndex + 1)
 	if err != nil {
+		r.sendSnapshot(to)
 		return false
 	}
 	sendEntries := make([]*pb.Entry, len(entries))
@@ -264,6 +266,21 @@ func (r *Raft) sendAppend(to uint64) bool {
 		Commit:  r.RaftLog.committed,
 	})
 	return true
+}
+
+func (r *Raft) sendSnapshot(to uint64) {
+	snapshot, err := r.RaftLog.storage.Snapshot()
+	if err != nil {
+		return
+	}
+	r.msgs = append(r.msgs, pb.Message{
+		MsgType:  pb.MessageType_MsgSnapshot,
+		To:       to,
+		From:     r.id,
+		Term:     r.Term,
+		Snapshot: &snapshot,
+	})
+	r.Prs[to].Next = snapshot.Metadata.Index + 1
 }
 
 func (r *Raft) sendAppendResponse(to uint64, reject bool) {
@@ -652,21 +669,24 @@ func (r *Raft) handleAppendEntries(m pb.Message) {
 	// but different terms), delete the existing entry and all that
 	// follow it (§5.3)
 	if len(m.Entries) > 0 {
-		st := 0
+		idx := 0
 		lastIndex := r.lastIndex()
 		for i, ent := range m.Entries {
-			st = i
+			idx = i
 			if ent.Index > lastIndex {
 				break
 			}
 			entTerm, err := r.RaftLog.Term(ent.Index)
 			if err != nil || entTerm != ent.Term {
-				r.RaftLog.RemoveEntriesFrom(ent.Index)
+				r.RaftLog.Truncate(ent.Index)
+				r.RaftLog.stabled = min(r.RaftLog.stabled, ent.Index-1)
+				r.RaftLog.committed = min(r.RaftLog.committed, ent.Index-1)
+				r.RaftLog.applied = min(r.RaftLog.applied, ent.Index-1)
 				break
 			}
 		}
-		if m.Entries[st].Index > r.lastIndex() {
-			r.RaftLog.AppendEntries(m.Entries[st:]...)
+		if m.Entries[idx].Index > r.lastIndex() {
+			r.RaftLog.AppendEntries(m.Entries[idx:]...)
 		}
 	}
 	// If leaderCommit > commitIndex, set commitIndex =
@@ -726,6 +746,25 @@ func (r *Raft) handleHeartbeatResponse(m pb.Message) {
 // handleSnapshot handle Snapshot RPC request
 func (r *Raft) handleSnapshot(m pb.Message) {
 	// Your Code Here (2C).
+	meta := m.Snapshot.Metadata
+	if m.Term < r.Term {
+		r.sendAppendResponse(m.From, true)
+	} else if r.RaftLog.committed >= meta.Index {
+		r.sendAppendResponse(m.From, false)
+	} else {
+		r.becomeFollower(m.Term, m.From)
+		r.RaftLog.firstIndex = meta.Index + 1
+		r.RaftLog.committed = meta.Index
+		r.RaftLog.applied = meta.Index
+		r.RaftLog.stabled = meta.Index
+		r.RaftLog.pendingSnapshot = m.Snapshot
+		r.RaftLog.entries = make([]pb.Entry, 0)
+		r.Prs = make(map[uint64]*Progress)
+		for _, id := range meta.ConfState.Nodes {
+			r.Prs[id] = &Progress{Next: r.RaftLog.LastIndex() + 1}
+		}
+		r.sendAppendResponse(m.From, false)
+	}
 }
 
 // addNode add a new node to raft group
